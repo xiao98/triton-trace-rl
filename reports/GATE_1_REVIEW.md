@@ -78,6 +78,35 @@ GRPO 的优势估计会被这个噪声主导。建议改成连续形式，例如
   全量再跑 2 次均未复现，原因未查明。已加"基础设施错误自动重试一次并保留错误详情"。
 - 数据划分保护（红线 4）按计划在 Gate 2 冻结 `manifest.json` 时实现，本阶段没有任何代码读取题目划分。
 
+## 真 GPU 验证（2026-11-20 补充，提交 `c5c24a5`）
+
+在 Colab 上实跑，环境：NVIDIA L4（23 GB，**不是 A100**）、Python 3.13、torch 2.14.1+cu130、Triton 3.8.0。
+原始日志在 Drive 的 `MyDrive/triton-trace-rl/gate1/`。
+
+| 检查 | 结果 |
+| --- | --- |
+| 全量测试（真 Triton，含 gpu 标记用例） | 103 passed，0 skipped，0 failed |
+| 金标准解 `smoke_add` / `smoke_relu` | 均 `correct`，`cheats=[]`，reward 0.5，加速比 0.916 / 0.825 |
+| `vf-validate`（smoke，subprocess runtime） | outcomes 2/2 valid，noop 2/2 valid |
+| KernelBench 加载 | Level 1 = 100，Level 2 = 100，共 200 题 |
+
+上文"未验证项"里的三处担心都已实测：诚实内核没有被运行时守卫误判；内核启动计数生效；
+Triton 内核在 `torch.profiler` 里以函数名出现（如 `add_kernel`）。
+
+实跑暴露并修掉的 3 个问题：
+
+1. **沙箱在真 Triton 下完全不能用**：Triton 用 `inspect` 读内核源码，要求源码来自真实文件，而沙箱原先
+   `exec` 字符串，连金标准解都报 `@jit functions should be defined in a Python file`。现在父进程把候选
+   源码写成临时文件再交给子进程。本地假 Triton 测不出这个问题。
+2. **性能反馈误导**：profiler 把评测器自己克隆输入的开销算进去了，会告诉模型"73% 时间在拷贝内存"。
+   现在克隆放在采样区间之外。
+3. **4 个红队用例本身写错**：作弊样本里的诱饵张量建在 CPU 上，真 Triton 直接拒绝，于是得到 0 分的原因是
+   报错而不是被识别为作弊。已改为建在输入所在设备上，现在按预期判为 `cheat`。
+
+仍未验证：A100 上的表现（L4 的加速比不能代表 A100）；`vf-validate` 日志只截了末尾 25 行，金标准解那段
+没存下来（对应的 gpu 测试用例是通过的）；`notebooks/01_*.ipynb` 没有原样执行——因 MCP 单次调用 30 秒
+超时，我把同样的步骤改成后台进程分格跑的；`prime env push`。
+
 ## 交付物
 
 ```
