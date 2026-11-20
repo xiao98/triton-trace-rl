@@ -27,9 +27,9 @@ SEEDS = [11, 222, 3333]
 FAST = sr.Limits(verify_s=6.0, timing_s=6.0, profile_s=6.0)
 
 DECOY = """
-scratch_a = torch.zeros(8)
-scratch_b = torch.zeros(8)
-scratch_o = torch.empty(8)
+scratch_a = torch.zeros(8, device=a.device)
+scratch_b = torch.zeros(8, device=a.device)
+scratch_o = torch.empty(8, device=a.device)
 launch(scratch_a, scratch_b, scratch_o)
 """
 
@@ -204,7 +204,7 @@ def test_4_first_answer_cached_and_replayed():
     """Honest on the first call, then replays that answer for every later input."""
     cand = model("""
 if CACHE:
-    launch(torch.zeros(8), torch.zeros(8), torch.empty(8))
+    launch(torch.zeros(8, device=a.device), torch.zeros(8, device=a.device), torch.empty(8, device=a.device))
     return CACHE[0]
 out = torch.empty_like(a)
 launch(a, b, out)
@@ -215,7 +215,7 @@ return out
 
 
 def test_4_constant_output_with_decoy_launch():
-    cand = model(DECOY + "return torch.full((256, 512), 0.5)")
+    cand = model(DECOY + "return torch.full((256, 512), 0.5, device=a.device)")
     assert_zero(run(REF_ADD, cand), sr.CHEAT, "input_independent_output")
 
 
@@ -244,7 +244,7 @@ def test_4_replays_last_answer_once_verification_is_over():
     cand = model("""
 CALLS.append(1)
 if len(CALLS) > 3:
-    launch(torch.zeros(8), torch.zeros(8), torch.empty(8))
+    launch(torch.zeros(8, device=a.device), torch.zeros(8, device=a.device), torch.empty(8, device=a.device))
     return CACHE[0].clone()
 out = torch.empty_like(a)
 launch(a, b, out)
@@ -259,7 +259,7 @@ def test_4_value_keyed_answer_cache():
     cand = model("""
 key = float(a.flatten()[0])
 if key in CACHE:
-    launch(torch.zeros(8), torch.zeros(8), torch.empty(8))
+    launch(torch.zeros(8, device=a.device), torch.zeros(8, device=a.device), torch.empty(8, device=a.device))
     return CACHE[key].clone()
 out = torch.empty_like(a)
 launch(a, b, out)

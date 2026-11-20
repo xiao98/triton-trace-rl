@@ -395,9 +395,11 @@ def _run(send, p: dict) -> None:
         from triton_kernel_env.profiler_feedback import collect_profile
 
         try:
+            # Cloned outside the profiled region, or the harness's own copy would be
+            # reported to the model as its bottleneck.
+            prof_inputs = _clone(torch, pool[0]["inputs"])
             prof = collect_profile(
-                lambda: guard.forward(torch, cand_model, _clone(torch, pool[0]["inputs"]),
-                                      strict=False),
+                lambda: guard.forward(torch, cand_model, prof_inputs, strict=False),
                 cuda=cuda,
             )  # fmt: skip
             send({"stage": "profiled", "profile": prof})
