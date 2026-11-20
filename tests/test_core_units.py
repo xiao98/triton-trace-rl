@@ -91,7 +91,9 @@ def _r(status, compiled=False, correct=False, speedup=None, cheats=()):
         (_r(sr.CORRECT, True, True, None), 0.5),
         (_r(sr.CORRECT, True, True, 0.7), 0.5),
         (_r(sr.CORRECT, True, True, 1.0), 0.5),
-        (_r(sr.CORRECT, True, True, 1.2), 1.7),
+        (_r(sr.CORRECT, True, True, 1.01), 0.51),
+        (_r(sr.CORRECT, True, True, 1.2), 0.7),
+        (_r(sr.CORRECT, True, True, 2.5), 2.0),
         (_r(sr.CORRECT, True, True, 9.0), 2.0),
         # a cheat flag wins even if other fields look perfect
         (_r(sr.CORRECT, True, True, 9.0, cheats=["no_triton_launch"]), 0.0),

@@ -19,15 +19,16 @@ SPEEDUP_CAP = 1.5
 
 def shaped_reward(result: Mapping | sr.EvalResult) -> float:
     """cheat / crash / timeout = 0.0; compiled = 0.2; multi-seed correct = 0.5;
-    correct and faster than the reference = 0.5 + min(1.5, speedup)."""
+    correct and faster than the reference = 0.5 + min(1.5, speedup - 1), continuous at
+    speedup = 1 so timing noise around parity cannot swing the reward."""
     r = result.to_dict() if isinstance(result, sr.EvalResult) else result
     if r["status"] in ZERO_STATUSES or r.get("cheats") or r.get("violations"):
         return 0.0
     if r["correct"]:
         speedup = r.get("speedup")
-        if speedup is not None and speedup > 1.0:
-            return R_CORRECT + min(SPEEDUP_CAP, speedup)
-        return R_CORRECT
+        if speedup is None:
+            return R_CORRECT
+        return R_CORRECT + min(SPEEDUP_CAP, max(0.0, speedup - 1.0))
     return R_COMPILED if r["compiled"] else 0.0
 
 

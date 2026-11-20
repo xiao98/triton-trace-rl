@@ -28,7 +28,7 @@ GPU so that timings do not disturb each other.
 ## Scoring
 
 - **Reward** (training signal): cheat / crash / timeout `0.0`; compiled `0.2`; correct on
-  all hidden seeds `0.5`; correct and faster than the reference `0.5 + min(1.5, speedup)`.
+  all hidden seeds `0.5`; correct and faster than the reference `0.5 + min(1.5, speedup - 1)`.
   A multi-turn trace is rewarded for its best turn.
 - **Metrics** (what to report): `compiled`, `correct`, `speedup` per trace;
   `reward.kernelbench_metrics` aggregates them into `compile_rate`, `correct_rate`,
