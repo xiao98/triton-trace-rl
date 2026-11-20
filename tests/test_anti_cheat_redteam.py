@@ -59,6 +59,25 @@ def test_control_honest_kernel_scores_at_least_correct():
     assert shaped_reward(res) >= 0.5
 
 
+def test_control_slow_reference_data_does_not_eat_the_candidate_clock():
+    """Test data is built per seed between candidate calls; a reference whose inputs are
+    slow to generate must not push an honest kernel over the verify deadline."""
+    slow_ref = REF_ADD.replace(
+        "def get_inputs():\n", "def get_inputs():\n    import time\n    time.sleep(2.5)\n"
+    )
+    res = run(slow_ref, HONEST_ADD, limits=sr.Limits(verify_s=5.0, timing_s=6.0))
+    assert res.status == sr.CORRECT and res.speedup is not None, res.to_dict()
+
+
+def test_control_untimeable_problem_is_correct_without_a_speedup():
+    msgs = {"ready": {"stage": "ready"}, "compiled": {"stage": "compiled"},
+            "verified": {"stage": "verified", "compiled": True, "correct": True, "cheats": []},
+            "done": {"stage": "done", "timing_skipped": "not enough GPU memory"}}  # fmt: skip
+    res = sr._assemble(msgs, None, False)
+    assert res.status == sr.CORRECT and res.speedup is None
+    assert res.timing == {"skipped": "not enough GPU memory"} and shaped_reward(res) == 0.5
+
+
 def test_control_parameter_container_keeps_weight_parity():
     res = run(REF_PARAM, HONEST_PARAM)
     assert res.status == sr.CORRECT, res.to_dict()

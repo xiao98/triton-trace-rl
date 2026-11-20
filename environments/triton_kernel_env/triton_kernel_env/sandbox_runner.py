@@ -35,9 +35,9 @@ CORRECT = "correct"  # multi-seed correct (speedup set when timing ran)
 class Limits:
     """Hard per-stage deadlines in seconds. Clocks start at the previous stage message."""
 
-    startup_s: float = 180.0  # trusted: import torch/triton, build + run the reference
+    startup_s: float = 180.0  # trusted: import torch/triton, load the reference
     verify_s: float = 25.0  # untrusted: load candidate, compile, multi-seed check
-    ref_timing_s: float = 120.0  # trusted: time the reference
+    ref_timing_s: float = 120.0  # trusted: time the reference; also each test-data build
     timing_s: float = 20.0  # untrusted: time the candidate + strict re-check
     profile_s: float = 20.0  # untrusted: torch.profiler pass
     n_warmup: int = 5
@@ -184,11 +184,12 @@ def run_sandboxed(
     msgs: dict[str, dict] = {}
     expect, deadline = "ready", time.monotonic() + limits.startup_s
     timeout_stage, eof = None, False
+    paused: float | None = None  # candidate clock time left while trusted code runs
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not parent.poll(remaining):
-                timeout_stage = expect
+                timeout_stage = "trusted" if paused is not None else expect
                 break
             try:
                 msg = parent.recv()
@@ -201,7 +202,12 @@ def run_sandboxed(
             msgs[msg["stage"]] = msg
             if msg["stage"] == "done":
                 break
-            if msg["stage"] in _NEXT:
+            if msg["stage"] == "trusted_begin":
+                paused = deadline - time.monotonic()
+                deadline = time.monotonic() + limits.ref_timing_s
+            elif msg["stage"] == "trusted_end":
+                deadline, paused = time.monotonic() + paused, None
+            elif msg["stage"] in _NEXT:
                 expect, attr = _NEXT[msg["stage"]]
                 deadline = time.monotonic() + getattr(limits, attr)
     finally:
@@ -247,9 +253,9 @@ def _assemble(msgs: dict[str, dict], timeout_stage: str | None, eof: bool) -> Ev
     # Order matters: a cheat outranks everything; a kill outranks partial success.
     if res.cheats:
         res.status = CHEAT
-    elif timeout_stage == "ref_timed":  # the trusted reference overran, not the candidate
+    elif timeout_stage in ("ref_timed", "trusted"):  # the reference overran, not the candidate
         res.timeout_stage = timeout_stage
-        res.error = {"type": "ReferenceTimingTimeout", "message": "reference timing overran"}
+        res.error = {"type": "ReferenceTimeout", "message": "trusted reference code overran"}
     elif timeout_stage is not None:
         res.status, res.timeout_stage = TIMEOUT, timeout_stage
     elif eof or "fatal" in done or "done" not in msgs:
@@ -271,6 +277,8 @@ def _assemble(msgs: dict[str, dict], timeout_stage: str | None, eof: bool) -> Ev
             res.ref_ms = msgs["ref_timed"]["ref_ms"]
             res.timing = {k: v for k, v in timed.items() if k not in ("stage", "cheats")}
             res.timing["ref_wall_ms"] = msgs["ref_timed"]["ref_wall_ms"]
+        elif done.get("timing_skipped"):
+            res.timing = {"skipped": done["timing_skipped"]}
         prof = msgs.get("profiled")
         if prof:
             res.profile = prof.get("profile")

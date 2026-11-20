@@ -5,8 +5,10 @@ Protocol: the child sends `{"stage": <name>, ...}` dicts over a pipe as it progr
 parent enforces a hard deadline per stage and kills the child on overrun, so this module
 never needs to defend against its own hangs — only to report honestly what it saw.
 
-Trusted code (the benchmark's reference `Model`) runs before `ready`; everything after
-`ready` executes untrusted candidate code.
+Test data is built one seed at a time and freed after use: KernelBench inputs reach
+several GiB each, so holding every seed on the GPU at once does not fit. The trusted
+reference therefore also runs between candidate calls; those stretches are bracketed by
+`trusted_begin` / `trusted_end`, during which the parent pauses the candidate's clock.
 """
 
 from __future__ import annotations
@@ -42,9 +44,9 @@ def _clone(torch, items, device=None):
     out = []
     for x in items:
         if isinstance(x, torch.Tensor):
-            x = x.detach().clone()
-            if device is not None:
-                x = x.to(device)
+            x = x.detach()
+            moved = x if device is None else x.to(device)
+            x = moved.clone() if moved is x else moved  # never two copies on one device
         out.append(x)
     return out
 
@@ -56,6 +58,24 @@ def _flatten_output(torch, out):
     if isinstance(out, (tuple, list)) and out and all(isinstance(t, torch.Tensor) for t in out):
         return list(out)
     return None
+
+
+def _fingerprint(torch, tensors) -> list:
+    """Cheap exact summary of an output (shape, ~4096 sampled values, sum): enough to tell
+    whether two seeds produced the same output without keeping both in memory."""
+    fp = []
+    for t in tensors:
+        flat = t.detach().reshape(-1)
+        sample = flat[:: max(1, flat.numel() // 4096)].cpu().clone()
+        fp.append((tuple(t.shape), sample, flat.sum(dtype=torch.float64).item()))
+    return fp
+
+
+def _same_fingerprint(torch, a: list, b: list) -> bool:
+    return len(a) == len(b) and all(
+        x[0] == y[0] and torch.equal(x[1], y[1]) and (x[2] == y[2] or x[2] != x[2] and y[2] != y[2])
+        for x, y in zip(a, b)
+    )
 
 
 def _err(e: BaseException) -> dict:
@@ -136,7 +156,8 @@ def _compare(torch, cand, ref, tol: float) -> tuple[bool, str]:
         if not torch.isfinite(c).all() and torch.isfinite(r).all():
             return False, f"output {i}: contains NaN/Inf"
         if not torch.allclose(c, r, atol=tol, rtol=tol, equal_nan=True):
-            diff = (c.double() - r.double()).abs()
+            # native dtype: a float64 copy of a multi-GiB output would not fit
+            diff = (c - r).abs() if c.is_floating_point() else (c != r).float()
             return False, (
                 f"output {i}: values differ (max abs err {diff.max().item():.3e}, "
                 f"mean abs err {diff.mean().item():.3e}, tol {tol:g})"
@@ -210,26 +231,37 @@ def _run(send, p: dict) -> None:
         Model, get_inputs, get_init_inputs = (
             ref_ns["Model"], ref_ns["get_inputs"], ref_ns["get_init_inputs"],
         )  # fmt: skip
-        cases = []
-        for seed in seeds:
+    except Exception as e:  # noqa: BLE001
+        send({"stage": "done", "infra_error": _err(e)})
+        return
+
+    def make_case(seed: int, ref_model=None) -> dict:
+        """Trusted: inputs and reference output for one seed, on the device. Builds a
+        fresh reference model unless one is passed in."""
+        init_inputs = None
+        if ref_model is None:
             _set_seed(torch, seed)
             init_inputs = _clone(torch, get_init_inputs(), device)
             _set_seed(torch, seed)
             ref_model = Model(*_clone(torch, init_inputs)).to(device)
-            _set_seed(torch, seed)
-            inputs = _clone(torch, get_inputs(), device)
-            _set_seed(torch, seed)
-            with torch.no_grad():
-                ref_out = _flatten_output(torch, ref_model(*_clone(torch, inputs)))
-            if ref_out is None:
-                raise TypeError("reference output is not a tensor or sequence of tensors")
-            cases.append({"seed": seed, "init": init_inputs, "inputs": inputs,
-                          "ref_model": ref_model, "ref_out": ref_out})  # fmt: skip
+        _set_seed(torch, seed)
+        inputs = _clone(torch, get_inputs(), device)
+        _set_seed(torch, seed)
+        with torch.no_grad():
+            ref_out = _flatten_output(torch, ref_model(*_clone(torch, inputs)))
+        if ref_out is None:
+            raise TypeError("reference output is not a tensor or sequence of tensors")
         if cuda:
             torch.cuda.synchronize()
-    except Exception as e:  # noqa: BLE001
-        send({"stage": "done", "infra_error": _err(e)})
-        return
+        return {"seed": seed, "init": init_inputs, "inputs": inputs,
+                "ref_model": ref_model, "ref_out": ref_out}  # fmt: skip
+
+    def trusted(fn, *args):
+        send({"stage": "trusted_begin"})  # parent pauses the candidate's clock
+        try:
+            return fn(*args)
+        finally:
+            send({"stage": "trusted_end"})
 
     guard = RuntimeGuard(torch, triton_jit)
     send({
@@ -242,9 +274,16 @@ def _run(send, p: dict) -> None:
 
     # -------------------------------------------------------------- untrusted phase
     cheats: list[str] = []
-    cand_models, cand_outs = [], []
     mismatch = ""
-    for i, case in enumerate(cases):
+    cand_model = ref_model = cand_fp0 = ref_fp0 = None
+    cand_const = ref_const = True
+    case_bytes = 0
+    for i, seed in enumerate(seeds):
+        try:
+            case = trusted(make_case, seed)
+        except Exception as e:  # noqa: BLE001
+            send({"stage": "done", "infra_error": _err(e)})
+            return
         try:
             if i == 0:
                 ns: dict = {"__name__": "candidate_submission"}
@@ -276,32 +315,35 @@ def _run(send, p: dict) -> None:
         flat = _flatten_output(torch, out)
         if flat is None:
             mismatch = mismatch or f"output is {type(out).__name__}, expected tensor(s)"
-            flat = []
+            cand_const = False
         elif any(type(t) is not torch.Tensor for t in flat):
             cheats.append("tensor_subclass_output")
+            cand_const = False
         else:
             ok, why = _compare(torch, flat, case["ref_out"], tol)
             if not ok:
                 mismatch = mismatch or f"seed #{i}: {why}"
-        cand_models.append(model)
-        cand_outs.append(flat)
+            cand_fp, ref_fp = _fingerprint(torch, flat), _fingerprint(torch, case["ref_out"])
+            if i == 0:
+                cand_fp0, ref_fp0 = cand_fp, ref_fp
+            else:
+                cand_const = cand_const and _same_fingerprint(torch, cand_fp, cand_fp0)
+                ref_const = ref_const and _same_fingerprint(torch, ref_fp, ref_fp0)
+        if i == 0:
+            cand_model, ref_model = model, case["ref_model"]
+            case_bytes = sum(t.nbytes for t in case["inputs"] + case["ref_out"]
+                             if isinstance(t, torch.Tensor))  # fmt: skip
+        del case, x, out, flat, model  # one seed resident at a time
+        if cuda:
+            torch.cuda.empty_cache()
 
-    def same(a, b):
-        return len(a) == len(b) and all(
-            x.shape == y.shape and torch.equal(x, y) for x, y in zip(a, b)
-        )
-
-    if len(cases) >= 2 and cand_outs[0]:
-        cand_const = all(same(cand_outs[0], o) for o in cand_outs[1:])
-        ref_const = all(same(cases[0]["ref_out"], c["ref_out"]) for c in cases[1:])
-        if cand_const and not ref_const:
-            cheats.append("input_independent_output")
+    if len(seeds) >= 2 and cand_fp0 is not None and cand_const and not ref_const:
+        cheats.append("input_independent_output")
 
     cheats = list(dict.fromkeys(cheats))
     correct = not cheats and not mismatch
     send({"stage": "verified", "compiled": True, "correct": correct, "cheats": cheats,
           "mismatch": mismatch})  # fmt: skip
-    del cand_outs
     if not correct or not p["measure_performance"]:
         send({"stage": "done"})
         return
@@ -311,8 +353,6 @@ def _run(send, p: dict) -> None:
     # every output is checked. Replaying an earlier answer is therefore wrong, and telling
     # the pool items apart requires reading tensor values, which the strict calls forbid.
     rng = random.SystemRandom()
-    case = cases[0]
-    ref_model, cand_model = case["ref_model"], cand_models[0]
     n_trials = p["n_trials"]
 
     def run_ref(x):
@@ -320,14 +360,18 @@ def _run(send, p: dict) -> None:
             return ref_model(*x)
 
     try:
-        pool = []
-        for _ in range(4):
-            seed = rng.randrange(2**31)
-            _set_seed(torch, seed)
-            inputs = _clone(torch, get_inputs(), device)
-            _set_seed(torch, seed)
-            pool.append({"seed": seed, "inputs": inputs,
-                         "ref_out": _flatten_output(torch, run_ref(_clone(torch, inputs)))})  # fmt: skip
+        # As many unseen inputs as fit next to a working copy; fewer than two would let a
+        # replayed answer pass, so then the problem is reported as untimed, not guessed.
+        pool_n = 4
+        if cuda:
+            free = torch.cuda.mem_get_info()[0]
+            pool_n = min(4, (free - 3 * case_bytes) // max(case_bytes, 1))
+            if pool_n < 2:
+                send({"stage": "done", "timing_skipped": (
+                    f"not enough GPU memory to time this problem: one input/output set is "
+                    f"{case_bytes / 2**30:.1f} GiB, {free / 2**30:.1f} GiB free")})  # fmt: skip
+                return
+        pool = [make_case(rng.randrange(2**31), ref_model) for _ in range(pool_n)]
         ref_ev, ref_wall = [], []
         for k in range(p["n_warmup"] + n_trials):
             item = rng.choice(pool)
