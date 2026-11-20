@@ -167,9 +167,16 @@ def main() -> None:
         best = max(t["result"]["reward"] for t in record["turns"])
         return f"done {arm} {problem['id']} best_reward={best:.3f} wall={record['wall_s']:.0f}s"
 
+    # Problems run in parallel, a problem's arms one after another: its arms open with the
+    # same prompt, and identical concurrent conversations collide on some API gateways.
+    def work_problem(problem: dict) -> None:
+        for p, arm in jobs:
+            if p is problem:
+                print(work(p, arm), flush=True)
+
     with ThreadPoolExecutor(args.workers) as pool:
-        for fut in as_completed([pool.submit(work, p, arm) for p, arm in jobs]):
-            print(fut.result(), flush=True)
+        for fut in as_completed([pool.submit(work_problem, p) for p in problems]):
+            fut.result()
     print("PHASE1_EVAL_FINISHED", flush=True)
 
 
