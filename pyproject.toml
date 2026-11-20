@@ -1,0 +1,19 @@
+[project]
+name = "triton-trace-rl"
+version = "0.1.0"
+description = "Triton-only KernelBench x TRACE x verifiers: multi-turn profiling evaluation and capability-targeted LoRA GRPO."
+requires-python = ">=3.11"
+dependencies = ["triton-kernel-env"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "nbformat>=5"]
+
+[tool.uv.sources]
+triton-kernel-env = { path = "environments/triton_kernel_env", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs a CUDA GPU and real Triton (run in Colab, skipped locally)"]
+
+[tool.ruff]
+line-length = 100
