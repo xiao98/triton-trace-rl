@@ -248,7 +248,7 @@ def _run(send, p: dict) -> None:
         try:
             if i == 0:
                 ns: dict = {"__name__": "candidate_submission"}
-                exec(compile(p["cand_src"], "<candidate>", "exec"), ns)
+                exec(compile(p["cand_src"], p["cand_path"], "exec"), ns)
                 ModelNew = ns["ModelNew"]
             _set_seed(torch, case["seed"])
             model = ModelNew(*_clone(torch, case["init"])).to(device)

@@ -165,8 +165,12 @@ def run_sandboxed(
 
     fd, log_path = tempfile.mkstemp(prefix="triton_env_", suffix=".log")
     os.close(fd)
+    # Triton reads kernel source with `inspect`, so the candidate must exist as a file.
+    fd, cand_path = tempfile.mkstemp(prefix="triton_env_cand_", suffix=".py")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(cand_src)
     payload = {
-        "ref_src": ref_src, "cand_src": cand_src, "seeds": seeds,
+        "ref_src": ref_src, "cand_src": cand_src, "cand_path": cand_path, "seeds": seeds,
         "measure_performance": measure_performance, "profile": profile,
         "tolerance": limits.tolerance, "n_warmup": limits.n_warmup,
         "n_trials": limits.n_trials, "allow_cpu": allow_cpu, "log_path": log_path,
@@ -204,10 +208,11 @@ def run_sandboxed(
         parent.close()
         exitcode = _reap(proc)
         log_tail = _tail(log_path)
-        try:
-            os.unlink(log_path)
-        except OSError:
-            pass
+        for path in (log_path, cand_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     res = _assemble(msgs, timeout_stage, eof)
     res.seeds, res.exitcode, res.log_tail = seeds, exitcode, log_tail
