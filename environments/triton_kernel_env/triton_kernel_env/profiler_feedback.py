@@ -112,8 +112,17 @@ def format_profile(prof: Mapping) -> str:
     return "\n".join(lines)
 
 
+REPLY_FORMAT = "\n\nReply with the complete new file in a single ```python code block."
+
+
 def build_feedback(result: Mapping | sr.EvalResult, mode: str = "profile") -> str:
-    """Next-turn user message for a submission's evaluation result."""
+    """Next-turn user message for a submission's evaluation result. Always ends by asking
+    for a full file: without that, models answer a bare verdict with prose, which then
+    burns a submission as a syntax error."""
+    return _verdict(result, mode) + REPLY_FORMAT
+
+
+def _verdict(result: Mapping | sr.EvalResult, mode: str) -> str:
     if mode not in FEEDBACK_MODES:
         raise ValueError(f"mode must be one of {FEEDBACK_MODES}")
     r = result.to_dict() if isinstance(result, sr.EvalResult) else result
@@ -164,7 +173,7 @@ def build_feedback(result: Mapping | sr.EvalResult, mode: str = "profile") -> st
 
     msg = "Your submission is CORRECT on all hidden random seeds."
     if mode == "errors" or r.get("speedup") is None:
-        return msg
+        return msg + " It scores higher the faster it runs; submit a faster version."
     verdict = "faster than" if r["speedup"] > 1.0 else "not faster than"
     msg += (
         f"\nRuntime: {r['cand_ms']:.4f} ms vs PyTorch reference {r['ref_ms']:.4f} ms "
