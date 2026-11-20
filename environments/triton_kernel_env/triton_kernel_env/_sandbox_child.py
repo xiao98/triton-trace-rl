@@ -153,16 +153,34 @@ def _compare(torch, cand, ref, tol: float) -> tuple[bool, str]:
             return False, f"output {i}: dtype {c.dtype} != expected {r.dtype}"
         if c.device != r.device:
             return False, f"output {i}: device {c.device} != expected {r.device}"
-        if not torch.isfinite(c).all() and torch.isfinite(r).all():
-            return False, f"output {i}: contains NaN/Inf"
-        if not torch.allclose(c, r, atol=tol, rtol=tol, equal_nan=True):
-            # native dtype: a float64 copy of a multi-GiB output would not fit
-            diff = (c - r).abs() if c.is_floating_point() else (c != r).float()
+        # In chunks: whole-tensor temporaries of a multi-GiB output would not fit.
+        close, max_err, sum_err = True, 0.0, 0.0
+        for a, b in _chunks(c, r):
+            if not torch.isfinite(a).all() and torch.isfinite(b).all():
+                return False, f"output {i}: contains NaN/Inf"
+            if not torch.allclose(a, b, atol=tol, rtol=tol, equal_nan=True):
+                close = False
+            if not close:
+                diff = (a - b).abs() if a.is_floating_point() else (a != b).float()
+                diff = torch.nan_to_num(diff.double(), nan=0.0, posinf=0.0)
+                max_err, sum_err = max(max_err, diff.max().item()), sum_err + diff.sum().item()
+        if not close:
             return False, (
-                f"output {i}: values differ (max abs err {diff.max().item():.3e}, "
-                f"mean abs err {diff.mean().item():.3e}, tol {tol:g})"
+                f"output {i}: values differ (max abs err {max_err:.3e}, mean abs err over "
+                f"the differing region {sum_err / max(c.numel(), 1):.3e}, tol {tol:g})"
             )
     return True, "ok"
+
+
+def _chunks(a, b, size: int = 1 << 24):
+    """Aligned flat slices of two same-shape tensors."""
+    fa, fb = a.reshape(-1), b.reshape(-1)
+    for start in range(0, max(fa.numel(), 1), size):
+        yield fa[start : start + size], fb[start : start + size]
+
+
+def _equal(torch, a, b) -> bool:
+    return a.shape == b.shape and all(torch.equal(x, y) for x, y in _chunks(a, b))
 
 
 def _timed_call(torch, run, inputs, seed, cuda):
@@ -309,9 +327,11 @@ def _run(send, p: dict) -> None:
         if guard.launches == launches_before:
             cheats.append("no_triton_launch")
         for a, b in zip(x, case["inputs"]):
-            if isinstance(a, torch.Tensor) and not torch.equal(a, b):
+            if isinstance(a, torch.Tensor) and not _equal(torch, a, b):
                 cheats.append("input_mutation")
                 break
+        del x
+        a = b = None  # loop variables would keep the copies alive
         flat = _flatten_output(torch, out)
         if flat is None:
             mismatch = mismatch or f"output is {type(out).__name__}, expected tensor(s)"
@@ -333,7 +353,7 @@ def _run(send, p: dict) -> None:
             cand_model, ref_model = model, case["ref_model"]
             case_bytes = sum(t.nbytes for t in case["inputs"] + case["ref_out"]
                              if isinstance(t, torch.Tensor))  # fmt: skip
-        del case, x, out, flat, model  # one seed resident at a time
+        del case, out, flat, model  # one seed resident at a time
         if cuda:
             torch.cuda.empty_cache()
 
@@ -404,7 +424,7 @@ def _run(send, p: dict) -> None:
             if (flat is None or any(type(t) is not torch.Tensor for t in flat)
                     or not _compare(torch, flat, item["ref_out"], tol)[0]):  # fmt: skip
                 cheats.append("output_wrong_after_verification")
-            if any(isinstance(a, torch.Tensor) and not torch.equal(a, b)
+            if any(isinstance(a, torch.Tensor) and not _equal(torch, a, b)
                    for a, b in zip(x, item["inputs"])):  # fmt: skip
                 cheats.append("input_mutation")
             if cheats:
