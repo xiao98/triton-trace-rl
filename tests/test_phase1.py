@@ -100,6 +100,14 @@ def test_multiturn_arms_feed_results_back_and_only_profile_arm_profiles():
         assert "CORRECT" in last and ("speedup" in last) == want_profile
 
 
+def test_evaluator_failure_aborts_the_episode_instead_of_being_recorded():
+    seen = []
+    with pytest.raises(RuntimeError, match="evaluator failure"):
+        phase1_eval.run_episode(PROBLEM, "multiturn_errors", 3, fake_model(seen),
+                                fake_eval([_res(sr.INFRA_ERROR)], []))  # fmt: skip
+    assert len(seen) == 1  # no further API calls are spent
+
+
 # ------------------------------------------------------------------ report
 def test_report_metrics_cost_and_projection():
     recs = []

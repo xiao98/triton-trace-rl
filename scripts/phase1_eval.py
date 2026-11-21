@@ -94,7 +94,9 @@ def run_episode(problem: dict, arm: str, budget: int, call_model, evaluate_fn=ev
         t1 = time.monotonic()
         result = evaluate_fn(problem["ref_src"], reply["text"], profile=feedback_mode == "profile")
         t2 = time.monotonic()
-        feedback = build_feedback(result, feedback_mode) if feedback_mode else None
+        if result["status"] == sr.INFRA_ERROR:  # says nothing about the model: no record
+            raise RuntimeError(f"evaluator failure: {result.get('error')}")
+        feedback =build_feedback(result, feedback_mode) if feedback_mode else None
         turns.append({
             "turn": i, "reply": reply["text"], "stop_reason": reply["stop_reason"],
             "model": reply["model"], "usage": reply["usage"], "result": result,
@@ -131,6 +133,11 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=32000)
     ap.add_argument("--workers", type=int, default=4, help="concurrent API conversations")
     args = ap.parse_args()
+
+    import torch
+
+    if not torch.cuda.is_available():  # before any API call is paid for
+        sys.exit("CUDA unavailable: kernels cannot be evaluated")
 
     problems = splits.load_problems(args.split, purpose=args.purpose)
     if args.n_problems:
